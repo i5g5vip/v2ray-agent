@@ -11,10 +11,10 @@ customPath=alone
 centosVersion=0
 totalProgress=1
 iplc=$1
-uuidws=
-uuidtcp=
-uuidVlessWS=
-uuidtcpdirect=
+uuid=
+uuidDirect=
+newUUID=
+newDirectUUID=
 customInstallType=
 
 # trap 'onCtrlC' INT
@@ -140,6 +140,12 @@ installTools(){
         ${installType} wget > /dev/null
     fi
 
+    if [[ -z `find /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin |grep -v grep|grep -w curl` ]]
+    then
+        echoContent green " ---> 安装curl"
+        ${installType} curl > /dev/null
+    fi
+
     if [[ -z `find /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin |grep -v grep|grep -w unzip` ]]
     then
         echoContent green " ---> 安装unzip"
@@ -241,15 +247,41 @@ initTLSNginxConfig(){
         echo "server {listen 80;server_name ${domain};root /usr/share/nginx/html;location ~ /.well-known {allow all;}location /test {return 200 'fjkvymb6len';}}" > /etc/nginx/conf.d/alone.conf
         # 启动nginx
         handleNginx start
+        echoContent yellow "\n检查IP是否设置为当前VPS"
+        checkIP
         # 测试nginx
-        echoContent green " ---> 检查Nginx是否正常访问"
+        echoContent yellow "\n检查Nginx是否正常访问"
         domainResult=`curl -s ${domain}/test|grep fjkvymb6len`
         if [[ ! -z ${domainResult} ]]
         then
             handleNginx stop
             echoContent green " ---> Nginx配置成功"
         else
-            echoContent red "    无法正常访问服务器，请检测域名是否正确、域名的DNS解析以及防火墙设置是否正确--->"
+            echoContent red " ---> 无法正常访问服务器，请检测域名是否正确、域名的DNS解析以及防火墙设置是否正确--->"
+            exit 0;
+        fi
+    fi
+}
+# 检查ip
+checkIP(){
+    pingIP=`ping -c 1 -W 1000 ${domain}|sed '1{s/[^(]*(//;s/).*//;q;}'`
+    if [[ ! -z "${pingIP}" ]] && [[ `echo ${pingIP}|grep '^\([1-9]\|[1-9][0-9]\|1[0-9][0-9]\|2[0-4][0-9]\|25[0-5]\)\.\([0-9]\|[1-9][0-9]\|1[0-9][0-9]\|2[0-4][0-9]\|25[0-5]\)\.\([0-9]\|[1-9][0-9]\|1[0-9][0-9]\|2[0-4][0-9]\|25[0-5]\)\.\([0-9]\|[1-9][0-9]\|1[0-9][0-9]\|2[0-4][0-9]\|25[0-5]\)$'` ]]
+    then
+        read -p "当前域名的IP为 [${pingIP}]，是否正确[y/n]？" domainStatus
+        if [[ "${domainStatus}" = "y" ]]
+        then
+            echoContent green "\n ---> IP确认完成"
+        else
+            echoContent red "\n ---> 1.检查Cloudflare DNS解析是否正常"
+            echoContent red " ---> 2.检查Cloudflare DNS云朵是否为灰色\n"
+            exit 0;
+        fi
+    else
+        read -p "IP查询失败，是否重试[y/n]？" retryStatus
+        if [[ "${retryStatus}" = "y" ]]
+        then
+            checkIP
+        else
             exit 0;
         fi
     fi
@@ -279,9 +311,10 @@ installTLS(){
     then
         echoContent yellow " ---> 检测到错误证书，需重新生成，重新生成中"
         rm -rf /etc/v2ray-agent/tls/*
-        installTLS
+        installTLS $1
     else
         echoContent green " ---> 检测到证书"
+        echoContent yellow " ---> 如未过期请选择[n]"
         read -p "是否重新生成？[y/n]:" reInstalTLStatus
         if [[ "${reInstalTLStatus}" = "y" ]]
         then
@@ -456,46 +489,56 @@ EOF
 # 更新证书
 renewalTLS(){
     echoContent skyBlue "\n进度  1/1 : 更新证书"
-    if [[ -d "/etc/v2ray-agent" ]] && [[ -d "/etc/v2ray-agent/v2ray" ]] && [[ -d "/etc/v2ray-agent/tls" ]] && [[ -f "/etc/v2ray-agent/v2ray/config_full.json" ]] && [[ -d "/root/.acme.sh" ]]
+    if [[ -d "/etc/v2ray-agent" ]] && [[ -d "/etc/v2ray-agent/v2ray" ]] && [[ -d "/etc/v2ray-agent/tls" ]] && [[ -d "/root/.acme.sh" ]]
     then
-        tcp=`cat /etc/v2ray-agent/v2ray/config_full.json|jq .inbounds[0]`
-        host=`echo ${tcp}|jq .streamSettings.xtlsSettings.certificates[0].certificateFile|awk -F '[t][l][s][/]' '{print $2}'|awk -F '["]' '{print $1}'|awk -F '[.][c][r][t]' '{print $1}'`
-        if [[ -d "/root/.acme.sh/${host}_ecc" ]] && [[ -f "/root/.acme.sh/${host}_ecc/${host}.key" ]] && [[ -f "/root/.acme.sh/${host}_ecc/${host}.cer" ]]
+        if [[ ! -z "${customInstallType}" ]] || [[ -f "/etc/v2ray-agent/v2ray/config_full.json" ]]
         then
-            modifyTime=`stat /root/.acme.sh/${host}_ecc/${host}.key|sed -n '6,6p'|awk '{print $2" "$3" "$4" "$5}'`
-
-            modifyTime=`date +%s -d "${modifyTime}"`
-            currentTime=`date +%s`
-    #        currentTime=`date +%s -d "2021-09-04 02:15:56.438105732 +0000"`
-    #        currentTIme=1609459200
-            stampDiff=`expr ${currentTime} - ${modifyTime}`
-            days=`expr ${stampDiff} / 86400`
-            remainingDays=`expr 90 - ${days}`
-            tlsStatus=${remainingDays}
-            if [[ ${remainingDays} -le 0 ]]
+            tcp=`cat /etc/v2ray-agent/v2ray/config_full.json|jq .inbounds[0]`
+            if [[ -d "/etc/v2ray-agent/v2ray/conf" ]] && [[ -f "/etc/v2ray-agent/v2ray/conf/02_VLESS_TCP_inbounds.json" ]]
             then
-                tlsStatus="已过期"
+                tcp=`cat /etc/v2ray-agent/v2ray/conf/02_VLESS_TCP_inbounds.json|jq .inbounds[0]`
             fi
-            echoContent skyBlue " ---> 证书生成日期:"`date -d @${modifyTime} +"%F %H:%M:%S"`
-            echoContent skyBlue " ---> 证书生成天数:"${days}
-            echoContent skyBlue " ---> 证书剩余天数:"${tlsStatus}
-            if [[ ${remainingDays} -le 1 ]]
+
+            host=`echo ${tcp}|jq .streamSettings.xtlsSettings.certificates[0].certificateFile|awk -F '[t][l][s][/]' '{print $2}'|awk -F '["]' '{print $1}'|awk -F '[.][c][r][t]' '{print $1}'`
+            if [[ -d "/root/.acme.sh/${host}_ecc" ]] && [[ -f "/root/.acme.sh/${host}_ecc/${host}.key" ]] && [[ -f "/root/.acme.sh/${host}_ecc/${host}.cer" ]]
             then
-                echoContent yellow " ---> 重新生成证书"
-                if [[ `ps -ef|grep -v grep|grep nginx` ]]
+                modifyTime=`stat /root/.acme.sh/${host}_ecc/${host}.key|sed -n '6,6p'|awk '{print $2" "$3" "$4" "$5}'`
+
+                modifyTime=`date +%s -d "${modifyTime}"`
+                currentTime=`date +%s`
+        #        currentTime=`date +%s -d "2021-09-04 02:15:56.438105732 +0000"`
+        #        currentTIme=1609459200
+                stampDiff=`expr ${currentTime} - ${modifyTime}`
+                days=`expr ${stampDiff} / 86400`
+                remainingDays=`expr 90 - ${days}`
+                tlsStatus=${remainingDays}
+                if [[ ${remainingDays} -le 0 ]]
                 then
-                    nginx -s stop
+                    tlsStatus="已过期"
                 fi
-                sudo ~/.acme.sh/acme.sh --installcert -d ${host} --fullchainpath /etc/v2ray-agent/tls/${host}.crt --keypath /etc/v2ray-agent/tls/${host}.key --ecc >> /etc/v2ray-agent/tls/acme.log
-                nginx
-                if [[ `ps -ef|grep -v grep|grep nginx` ]]
+                echoContent skyBlue " ---> 证书生成日期:"`date -d @${modifyTime} +"%F %H:%M:%S"`
+                echoContent skyBlue " ---> 证书生成天数:"${days}
+                echoContent skyBlue " ---> 证书剩余天数:"${tlsStatus}
+                if [[ ${remainingDays} -le 1 ]]
                 then
-                    echoContent green " ---> nginx启动成功"
+                    echoContent yellow " ---> 重新生成证书"
+                    if [[ `ps -ef|grep -v grep|grep nginx` ]]
+                    then
+                        nginx -s stop
+                    fi
+                    sudo ~/.acme.sh/acme.sh --installcert -d ${host} --fullchainpath /etc/v2ray-agent/tls/${host}.crt --keypath /etc/v2ray-agent/tls/${host}.key --ecc >> /etc/v2ray-agent/tls/acme.log
+                    nginx
+                    if [[ `ps -ef|grep -v grep|grep nginx` ]]
+                    then
+                        echoContent green " ---> nginx启动成功"
+                    else
+                        echoContent red " ---> nginx启动失败，请检查[/etc/v2ray-agent/tls/acme.log]"
+                    fi
                 else
-                    echoContent red " ---> nginx启动失败，请检查[/etc/v2ray-agent/tls/acme.log]"
+                    echoContent green " ---> 证书有效"
                 fi
             else
-                echoContent green " ---> 证书有效"
+                echoContent red " ---> 无法找到相应证书路径，请使用脚本重新安装"
             fi
         else
             echoContent red " ---> 无法找到相应路径，请使用脚本重新安装"
@@ -522,8 +565,17 @@ installV2Ray(){
         version=`curl -s https://github.com/v2fly/v2ray-core/releases|grep /v2ray-core/releases/tag/|head -1|awk -F "[/]" '{print $6}'|awk -F "[>]" '{print $2}'|awk -F "[<]" '{print $1}'`
         # version="v4.27.4"
         echoContent green " ---> v2ray-core版本:${version}"
-        wget -q -P /etc/v2ray-agent/v2ray/ https://github.com/v2fly/v2ray-core/releases/download/${version}/v2ray-linux-64.zip
+#        echoContent green " ---> 下载v2ray-core核心中"
+        if [[ ! -z `wget --help|grep show-progress` ]]
+        then
+            wget -c -q --show-progress -P /etc/v2ray-agent/v2ray/ https://github.com/v2fly/v2ray-core/releases/download/${version}/v2ray-linux-64.zip
+        else
+            wget -c -P /etc/v2ray-agent/v2ray/ https://github.com/v2fly/v2ray-core/releases/download/${version}/v2ray-linux-64.zip
+        fi
+
+#        echoContent green " ---> 下载完毕，解压中"
         unzip -o /etc/v2ray-agent/v2ray/v2ray-linux-64.zip -d /etc/v2ray-agent/v2ray > /dev/null
+#        echoContent green " ---> 解压完毕，删除压缩包"
         rm -rf /etc/v2ray-agent/v2ray/v2ray-linux-64.zip
     else
         # progressTools "green" "  v2ray-core版本:`/etc/v2ray-agent/v2ray/v2ray --version|awk '{print $2}'|head -1`"
@@ -608,9 +660,18 @@ updateV2Ray(){
             version=`curl -s https://github.com/v2fly/v2ray-core/releases|grep /v2ray-core/releases/tag/|head -1|awk -F "[/]" '{print $6}'|awk -F "[>]" '{print $2}'|awk -F "[<]" '{print $1}'`
         fi
         echoContent green " ---> v2ray-core版本:${version}"
-        wget -q -P /etc/v2ray-agent/v2ray/ https://github.com/v2fly/v2ray-core/releases/download/${version}/v2ray-linux-64.zip
-        unzip -o  /etc/v2ray-agent/v2ray/v2ray-linux-64.zip -d /etc/v2ray-agent/v2ray > /dev/null
+#        echoContent green " ---> 下载v2ray-core核心中"
 
+        if [[ ! -z `wget --help|grep show-progress` ]]
+        then
+            wget -c -q --show-progress -P /etc/v2ray-agent/v2ray/ https://github.com/v2fly/v2ray-core/releases/download/${version}/v2ray-linux-64.zip
+        else
+            wget -c -P /etc/v2ray-agent/v2ray/ https://github.com/v2fly/v2ray-core/releases/download/${version}/v2ray-linux-64.zip
+        fi
+
+#        echoContent green " ---> 下载完毕，解压中"
+        unzip -o  /etc/v2ray-agent/v2ray/v2ray-linux-64.zip -d /etc/v2ray-agent/v2ray > /dev/null
+#        echoContent green " ---> 解压完毕，删除压缩包"
         rm -rf /etc/v2ray-agent/v2ray/v2ray-linux-64.zip
         handleV2Ray stop
         handleV2Ray start
@@ -812,24 +873,24 @@ installV2RayService(){
             execStart='/etc/v2ray-agent/v2ray/v2ray -confdir /etc/v2ray-agent/v2ray/conf'
         fi
     cat << EOF > /etc/systemd/system/v2ray.service
-        [Unit]
-        Description=V2Ray - A unified platform for anti-censorship
-        Documentation=https://v2ray.com https://guide.v2fly.org
-        After=network.target nss-lookup.target
-        Wants=network-online.target
+[Unit]
+Description=V2Ray - A unified platform for anti-censorship
+Documentation=https://v2ray.com https://guide.v2fly.org
+After=network.target nss-lookup.target
+Wants=network-online.target
 
-        [Service]
-        Type=simple
-        User=root
-        CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW
-        NoNewPrivileges=yes
-        ExecStart=${execStart}
-        Restart=on-failure
-        RestartPreventExitStatus=23
+[Service]
+Type=simple
+User=root
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW
+NoNewPrivileges=yes
+ExecStart=${execStart}
+Restart=on-failure
+RestartPreventExitStatus=23
 
 
-        [Install]
-        WantedBy=multi-user.target
+[Install]
+WantedBy=multi-user.target
 EOF
         systemctl daemon-reload
         systemctl enable v2ray.service
@@ -898,7 +959,7 @@ handleV2Ray(){
             echoContent green " ---> V2Ray启动成功"
         else
             echoContent red "V2Ray启动失败"
-            echoContent red "ps -ef|grep v2ray,查看日志"
+            echoContent red "执行 [ps -ef|grep v2ray] 查看日志"
             exit 0;
         fi
     elif [[ "$1" = "stop" ]]
@@ -959,14 +1020,44 @@ handleTrojanGo(){
 }
 # 初始化V2Ray 配置文件
 initV2RayConfig(){
-
-    uuidtcp=`/etc/v2ray-agent/v2ray/v2ctl uuid`
-    uuidws=`/etc/v2ray-agent/v2ray/v2ctl uuid`
-    uuidVmessTcp=`/etc/v2ray-agent/v2ray/v2ctl uuid`
-    uuidVlessWS=`/etc/v2ray-agent/v2ray/v2ctl uuid`
-    uuidtcpdirect=`/etc/v2ray-agent/v2ray/v2ctl uuid`
-
     echoContent skyBlue "\n进度 $2/${totalProgress} : 初始化V2Ray配置"
+
+    if [[ -d "/etc/v2ray-agent" && -d "/etc/v2ray-agent/v2ray" ]] && [[ -f "/etc/v2ray-agent/v2ray/config_full.json" || -f "/etc/v2ray-agent/v2ray/conf/02_VLESS_TCP_inbounds.json"  ]]
+    then
+        echo
+        read -p "读取到上次安装记录，是否使用上次安装时的UUID ？[y/n]:" historyUUIDStatus
+        if [[ "${historyUUIDStatus}" = "y" ]]
+        then
+            if [[ -f "/etc/v2ray-agent/v2ray/config_full.json" ]]
+            then
+                uuid=`cat /etc/v2ray-agent/v2ray/config_full.json|jq .inbounds[0].settings.clients[0].id|awk -F '["]' '{print $2}'`
+                uuidDirect=`cat /etc/v2ray-agent/v2ray/config_full.json|jq .inbounds[0].settings.clients[1].id|awk -F '["]' '{print $2}'`
+            elif [[ -f "/etc/v2ray-agent/v2ray/conf/02_VLESS_TCP_inbounds.json" ]]
+            then
+
+                uuid=`cat /etc/v2ray-agent/v2ray/conf/02_VLESS_TCP_inbounds.json|jq .inbounds[0].settings.clients[0].id|awk -F '["]' '{print $2}'`
+                uuidDirect=`cat /etc/v2ray-agent/v2ray/conf/02_VLESS_TCP_inbounds.json|jq .inbounds[0].settings.clients[1].id|awk -F '["]' '{print $2}'`
+            fi
+        fi
+    else
+        uuid=`/etc/v2ray-agent/v2ray/v2ctl uuid`
+        uuidDirect=`/etc/v2ray-agent/v2ray/v2ctl uuid`
+    fi
+    if [[ -z "${uuid}" ]] || [[ -z "${uuidDirect}" ]]
+    then
+        echoContent red "\n ---> uuid读取错误，重新生成"
+        uuid=`/etc/v2ray-agent/v2ray/v2ctl uuid`
+        uuidDirect=`/etc/v2ray-agent/v2ray/v2ctl uuid`
+    fi
+
+    if [[ "${uuid}" = "${uuidDirect}" ]]
+    then
+        echoContent red "\n ---> uuid重复，重新生成"
+        uuid=`/etc/v2ray-agent/v2ray/v2ctl uuid`
+        uuidDirect=`/etc/v2ray-agent/v2ray/v2ctl uuid`
+    fi
+    echoContent green "\n ---> 使用成功"
+
     rm -rf /etc/v2ray-agent/v2ray/conf/*
     rm -rf /etc/v2ray-agent/v2ray/config_full.json
     if [[ "$1" = "vlesstcpws" ]]
@@ -985,13 +1076,13 @@ initV2RayConfig(){
       "settings": {
         "clients": [
           {
-            "id": "${uuidtcp}",
+            "id": "${uuid}",
             "add": "${add}",
             "flow":"xtls-rprx-origin",
             "email": "${domain}_VLESS_XTLS/TLS-origin_TCP"
           },
           {
-            "id": "${uuidtcpdirect}",
+            "id": "${uuidDirect}",
             "flow":"xtls-rprx-direct",
             "email": "${domain}_VLESS_XTLS/TLS-direct_TCP"
           }
@@ -1041,7 +1132,7 @@ initV2RayConfig(){
       "settings": {
         "clients": [
           {
-            "id": "${uuidws}",
+            "id": "${uuid}",
             "alterId": 1,
             "level": 0,
             "email": "${domain}_vmess_ws"
@@ -1064,7 +1155,7 @@ initV2RayConfig(){
       "settings": {
         "clients": [
           {
-            "id": "${uuidVmessTcp}",
+            "id": "${uuid}",
             "level": 0,
             "alterId": 1,
             "email": "${domain}_vmess_tcp"
@@ -1094,7 +1185,7 @@ initV2RayConfig(){
       "settings": {
         "clients": [
           {
-            "id": "${uuidVlessWS}",
+            "id": "${uuid}",
             "level": 0,
             "email": "${domain}_vless_ws"
           }
@@ -1194,7 +1285,7 @@ EOF
       "settings": {
         "clients": [
           {
-            "id": "${uuidVlessWS}",
+            "id": "${uuid}",
             "level": 0,
             "email": "${domain}_vless_ws"
           }
@@ -1229,7 +1320,7 @@ EOF
       "settings": {
         "clients": [
           {
-            "id": "${uuidVmessTcp}",
+            "id": "${uuid}",
             "level": 0,
             "alterId": 1,
             "email": "${domain}_vmess_tcp"
@@ -1270,7 +1361,7 @@ EOF
       "settings": {
         "clients": [
           {
-            "id": "${uuidws}",
+            "id": "${uuid}",
             "alterId": 1,
             "add": "${add}",
             "level": 0,
@@ -1302,13 +1393,13 @@ EOF
       "settings": {
         "clients": [
           {
-            "id": "${uuidtcp}",
+            "id": "${uuid}",
             "add": "${add}",
             "flow":"xtls-rprx-origin",
             "email": "${domain}_VLESS_XTLS/TLS-origin_TCP"
           },
           {
-            "id": "${uuidtcpdirect}",
+            "id": "${uuidDirect}",
             "flow":"xtls-rprx-direct",
             "email": "${domain}_VLESS_XTLS/TLS-direct_TCP"
           }
@@ -1341,7 +1432,7 @@ EOF
 }
 # 初始化Trojan-Go配置
 initTrojanGoConfig(){
-    uuidTrojanGo=`/etc/v2ray-agent/v2ray/v2ctl uuid`
+#    uuidTrojanGo=`/etc/v2ray-agent/v2ray/v2ctl uuid`
     echoContent skyBlue "\n进度 $1/${totalProgress} : 初始化Trojan配置"
     cat << EOF > /etc/v2ray-agent/trojan/config.json
 {
@@ -1353,7 +1444,7 @@ initTrojanGoConfig(){
     "log_level":0,
     "log_file":"/etc/v2ray-agent/trojan/trojan.log",
     "password": [
-        "${uuidTrojanGo}"
+        "${uuid}"
     ],
     "dns":[
         "74.82.42.42",
@@ -1486,23 +1577,6 @@ defaultBase64Code(){
         echoContent green "    trojan-go://${id}@${add}:443?sni=${host}&type=ws&host=${host}&path=%2F${path}#${host}_trojan_ws\n"
     fi
 }
-# quanMult base64Code
-quanMultBase64Code(){
-    local ps=$1
-    local id=$2
-    local host=$3
-    local path=$4
-    qrCodeBase64Quanmult=`echo -n ''${ps}' = vmess, '${add}', 443, aes-128-cfb, '${id}', over-tls=true, tls-host='${host}', certificate=1, obfs=ws, obfs-path='${path}', obfs-header="Host: '${host}'[Rr][Nn]User-Agent: Mozilla/5.0 (iPhone; CPU iPhone OS 11_2_6 like Mac OS X) AppleWebKit/604.5.6 (KHTML, like Gecko) Mobile/15D100"'|base64`
-    qrCodeBase64Quanmult=`echo ${qrCodeBase64Quanmult}|sed 's/ //g'`
-    echoContent red "Quantumult vmess--->"
-    echoContent green "    vmess://${qrCodeBase64Quanmult}\n"
-    echo '' >> /etc/v2ray-agent/v2ray/usersv2ray.conf
-    echo "Quantumult:" >> /etc/v2ray-agent/v2ray/usersv2ray.conf
-    echo "  vmess://${qrCodeBase64Quanmult}" >> /etc/v2ray-agent/v2ray/usersv2ray.conf
-    echoContent red "Quantumult 明文--->"
-    echoContent green  '    '${ps}' = vmess, '${add}', 443, aes-128-cfb, '${id}', over-tls=true, tls-host='${host}', certificate=1, obfs=ws, obfs-path='${path}', obfs-header="Host: '${host}'[Rr][Nn]User-Agent: Mozilla/5.0 (iPhone; CPU iPhone OS 11_2_6 like Mac OS X) AppleWebKit/604.5.6 (KHTML, like Gecko) Mobile/15D100"'
-}
-
 # 进度条工具 废弃
 progressTool(){
     #
@@ -1734,39 +1808,177 @@ unInstall(){
 # 检查错误
 checkFail(){
     echoContent skyBlue "\n进度 $1/${totalProgress} : 检查错误"
-    if [[ -d "/etc/v2ray-agent" ]]
+    if [[ -d "/etc/v2ray-agent" ]] && [[ -d "/etc/v2ray-agent/v2ray" ]]
     then
-        if [[ -d "/etc/v2ray-agent/v2ray/" ]]
+        V2RayProcessStatus=
+        # V2Ray
+        if [[ ! -z `ls /etc/v2ray-agent/v2ray/|grep -w v2ray` ]] && [[ ! -z `ls /etc/v2ray-agent/v2ray/|grep -w v2ctl` ]] && [[ ! -z `ps -ef|grep -v grep|grep v2ray-agent/v2ray` ]]
         then
-            if [[ -z `ls -F /etc/v2ray-agent/v2ray/|grep "v2ray"` ]] || [[ -z `ls -F /etc/v2ray-agent/v2ray/|grep "v2ctl"` ]]
+            V2RayProcessStatus=true
+            echoContent green " ---> V2Ray 运行正常"
+        else
+            echoContent yellow "检查V2Ray是否安装"
+            if [[ -z `ls /etc/v2ray-agent/v2ray/|grep -w v2ray` ]] || [[ -z `ls /etc/v2ray-agent/v2ray/|grep -w v2ctl` ]]
             then
                 echoContent red " ---> V2Ray 未安装"
             else
-                echoContent green " ---> v2ray-core版本:`/etc/v2ray-agent/v2ray/v2ray --version|awk '{print $2}'|head -1`"
-                if [[ -z `/etc/v2ray-agent/v2ray/v2ray --test /etc/v2ray-agent/v2ray/config_full.json|tail -n +3|grep "Configuration OK"` ]]
-                then
-                    echoContent red " ---> V2Ray 配置文件异常"
-                    /etc/v2ray-agent/v2ray/v2ray --test /etc/v2ray-agent/v2ray/config_full.json
-                elif [[ -z `ps -ef|grep -v grep|grep v2ray` ]]
-                then
-                    echoContent red " ---> V2Ray 未启动"
-                else
-                    echoContent green " ---> V2Ray 正常运行"
-                fi
+                echoContent green " ---> V2Ray 已安装"
             fi
-        else
-            echoContent red " ---> V2Ray 未安装"
+            echoContent yellow "\n检查V2Ray开机自启文件是否存在"
+            if [[ -f "/etc/systemd/system/v2ray.service" ]]
+            then
+                if [[ ! -z `cat /etc/systemd/system/v2ray.service|grep v2ray-agent` ]]
+                then
+                    echoContent green " ---> V2Ray 开机自启文件存在"
+                else
+                    echoContent red " ---> V2Ray 开机自启文件出现异常，请重新使用此脚本安装"
+                fi
+            else
+                echoContent grep " ---> V2Ray 开机自启不存在"
+            fi
+            echoContent yellow "\n检查V2Ray配置文件是否存在"
+            if [[ ! -z `ls /etc/v2ray-agent/v2ray/|grep -w config_full.json` ]] || [[ ! -z "${customInstallType}" ]]
+            then
+                echoContent green " ---> V2Ray配置文件存在"
+                echoContent yellow "\n验证配置文件是否正常"
+                if [[ -f "/etc/v2ray-agent/v2ray/config_full.json" ]]
+                then
+                    # [安装]方式
+                    if [[ ! -z `/etc/v2ray-agent/v2ray/v2ray -test -c /etc/v2ray-agent/v2ray/config_full.json|grep "failed"` ]]
+                    then
+                        echoContent red " ---> V2Ray配置文件验证失败，错误日志如下，如没有手动更改配置请提issues"
+                        /etc/v2ray-agent/v2ray/v2ray -test -c /etc/v2ray-agent/v2ray/config_full.json
+                    else
+                        V2RayProcessStatus=true
+                        echoContent green " ---> V2Ray配置文件验证成功"
+                    fi
+                elif [[ ! -z "${customInstallType}" ]]
+                then
+                    # [个性化]安装方式
+                    /etc/v2ray-agent/v2ray/v2ray -test -confdir /etc/v2ray-agent/v2ray/conf > /tmp/customV2rayAgentLog 2>&1
+                    if [[ ! -z `cat /tmp/customV2rayAgentLog|grep fail` ]]
+                    then
+                        echoContent red " ---> V2Ray配置文件验证失败，错误日志如下，如没有手动更改配置请提issues"
+                        /etc/v2ray-agent/v2ray/v2ray -test -confdir /etc/v2ray-agent/v2ray/conf
+                    else
+                        V2RayProcessStatus=true
+                        echoContent green " ---> V2Ray配置文件验证成功"
+                    fi
+                    rm -f /tmp/customV2rayAgentLog
+                fi
+                if [[ "${V2RayProcessStatus}" = "true" ]] && [[ -z `ps -ef|grep -v grep|grep v2ray-agent/v2ray` ]]
+                then
+                    echoContent yellow "\n尝试重新启动"
+                    handleV2Ray start
+                fi
+            else
+                echoContent red " ---> V2Ray配置文件不存在，请重新使用此脚本安装"
+            fi
         fi
+        # 运行正常的情况需要判定几个连接是否正常 出现400 invalid request
 
-        if [[ -z `ps -ef|grep -v grep|grep nginx` ]]
-        then
-            echoContent red " ---> Nginx 未启动，伪装博客无法使用"
-        else
-            echoContent green " ---> Nginx 正常运行"
-        fi
+        ########
     else
         echoContent red " ---> 未使用脚本安装"
     fi
+
+    # 检查服务是否可用
+    if [[ "${V2RayProcessStatus}" = "true" ]]
+    then
+        echo
+        read -p "是否检查服务是否可用，执行此操作会清空[error]日志，是否执行[y/n]？" checkServerStatus
+        if [[ "${checkServerStatus}" = "y" ]]
+        then
+            filePath=
+            host=
+            if [[ -f "/etc/v2ray-agent/v2ray/config_full.json" ]] && [[ -z "${customInstallType}" ]]
+            then
+                filePath="/etc/v2ray-agent/v2ray/config_full.json"
+                host=`cat /etc/v2ray-agent/v2ray/config_full.json|jq .inbounds[0]|jq .streamSettings.xtlsSettings.certificates[0].certificateFile|awk -F '[t][l][s][/]' '{print $2}'|awk -F '["]' '{print $1}'|awk -F '[.][c][r][t]' '{print $1}'`
+            elif [[ ! -z "${customInstallType}" ]]
+            then
+                filePath="/etc/v2ray-agent/v2ray/conf/02_VLESS_TCP_inbounds.json"
+                host=`cat /etc/v2ray-agent/v2ray/conf/02_VLESS_TCP_inbounds.json|jq .inbounds[0]|jq .streamSettings.xtlsSettings.certificates[0].certificateFile|awk -F '[t][l][s][/]' '{print $2}'|awk -F '["]' '{print $1}'|awk -F '[.][c][r][t]' '{print $1}'`
+            fi
+
+            if [[ ! -z "${host}" ]]
+            then
+                checkV2RayServer vlesstcp ${host}
+                cat ${filePath}|jq .inbounds[0].settings.fallbacks|jq -c '.[]'|while read row
+                do
+                    if [[ ! -z `echo ${row}|grep 31299` ]]
+                    then
+                        # vmess ws
+                        path=`echo ${row}|awk -F '["]' '{print $4}'`
+                        checkV2RayServer vmessws ${host} ${path}
+                    fi
+
+                    if [[ ! -z `echo ${row}|grep 31298` ]]
+                    then
+                        path=`echo ${row}|awk -F '["]' '{print $4}'`
+                        checkV2RayServer vmesstcp ${host} ${path}
+                    fi
+
+                    if [[ ! -z `echo ${row}|grep 31297` ]]
+                    then
+                        # vless ws
+                        path=`echo ${row}|awk -F '["]' '{print $4}'`
+                        checkV2RayServer vlessws ${host} ${path}
+                    fi
+                done
+            fi
+        fi
+    fi
+    exit 0;
+}
+# 检查V2Ray具体服务是否正常
+checkV2RayServer(){
+    local type=$1
+    local host=$2
+    local path=$3
+
+    echo '' > /etc/v2ray-agent/v2ray_error.log
+
+    case ${type} in
+    vlesstcp)
+        echoContent yellow "\n判断VLESS+TCP是否可用"
+        curl -s -L https://${host} > /dev/null
+        if [[ ! -z `cat /etc/v2ray-agent/v2ray/v2ray_error.log|grep -w "firstLen = 83"` ]] && [[ ! -z `cat /etc/v2ray-agent/v2ray/v2ray_error.log|grep -w "invalid request version"` ]] && [[ ! -z `cat /etc/v2ray-agent/v2ray/v2ray_error.log|grep -w "realPath = /"` ]]
+        then
+            echoContent green " ---> 初步判断VLESS+TCP可用，需自己进一步判断是否真正可用"
+        else
+            echoContent red " ---> 初步判断VLESS+TCP不可用，需自己进一步判断是否真正可用"
+        fi
+    ;;
+    vlessws)
+        echoContent yellow "\n判断VLESS+WS是否可用"
+        if [[ ! -z `curl -s -L https://${host}${path}|grep -v grep|grep "Bad Request"` ]]
+        then
+            echoContent green " ---> 初步判断VLESS+WS可用，需自己进一步判断是否真正可用"
+        else
+            echoContent red " ---> 初步判断VLESS+WS不可用，需自己进一步判断是否真正可用"
+        fi
+    ;;
+    vmessws)
+        echoContent yellow "\n判断VMess+WS是否可用"
+        if [[ ! -z `curl -s -L https://${host}${path}|grep -v grep|grep "Bad Request"` ]]
+        then
+            echoContent green " ---> 初步判断VMess+WS可用，需自己进一步判断是否真正可用"
+        else
+            echoContent red " ---> 初步判断VMess+WS不可用，需自己进一步判断是否真正可用"
+        fi
+    ;;
+    vmesstcp)
+        echoContent yellow "\n判断VMess+TCP是否可用"
+        curl -s -L https://${host} > /dev/null
+        if [[ ! -z `cat /etc/v2ray-agent/v2ray/v2ray_error.log|grep -w "firstLen = 89"` ]] && [[ ! -z `cat /etc/v2ray-agent/v2ray/v2ray_error.log|grep -w "invalid request version"` ]]
+        then
+            echoContent green " ---> 初步判断VMess+TCP可用，需自己进一步判断是否真正可用"
+        else
+            echoContent red " ---> 初步判断VMess+TCP不可用，需自己进一步判断是否真正可用"
+        fi
+    ;;
+    esac
 }
 # 修改V2Ray CDN节点
 updateV2RayCDN(){
@@ -1854,37 +2066,64 @@ updateV2RayCDN(){
     fi
     menu
 }
+
 # 重置UUID
 resetUUID(){
     echoContent skyBlue "\n进度 $1/${totalProgress} : 重置UUID"
     local resetStatus=false
     if [[ -d "/etc/v2ray-agent" ]] && [[ -d "/etc/v2ray-agent/v2ray" ]] && [[ -f "/etc/v2ray-agent/v2ray/config_full.json" ]] && [[ -z "${customInstallType}" ]]
     then
-        cat /etc/v2ray-agent/v2ray/config_full.json|jq .inbounds|jq -c '.[].settings.clients'|jq -c '.[].id'|while read row
-        do
-            oldUUID=`echo ${row}|awk -F "[\"]" '{print $2}'`
-            newUUID=`/etc/v2ray-agent/v2ray/v2ctl uuid`
-            echoContent red "旧：${oldUUID}"
-            echoContent red "新UUID：${newUUID}"
-            sed -i "s/${oldUUID}/${newUUID}/g"  `grep "${oldUUID}" -rl /etc/v2ray-agent/v2ray/config_full.json`
-        done
+        newUUID=`/etc/v2ray-agent/v2ray/v2ctl uuid`
+        newDirectUUID=`/etc/v2ray-agent/v2ray/v2ctl uuid`
+
+        currentUUID=`cat /etc/v2ray-agent/v2ray/config_full.json|jq .inbounds[0].settings.clients[0].id|awk -F '["]' '{print $2}'`
+        currentDirectUUID=`cat /etc/v2ray-agent/v2ray/config_full.json|jq .inbounds[0].settings.clients[1].id|awk -F '["]' '{print $2}'`
+        if [[ ! -z "${currentUUID}" ]] && [[ ! -z "${currentDirectUUID}" ]]
+        then
+            sed -i "s/${currentUUID}/${newUUID}/g"  `grep "${currentUUID}" -rl /etc/v2ray-agent/v2ray/config_full.json`
+            sed -i "s/${currentDirectUUID}/${newDirectUUID}/g"  `grep "${currentDirectUUID}" -rl /etc/v2ray-agent/v2ray/config_full.json`
+        fi
+
         echoContent green " ---> V2Ray UUID重置完毕"
         handleV2Ray stop
         handleV2Ray start
         resetStatus=true
     elif [[ -d "/etc/v2ray-agent" ]] && [[ -d "/etc/v2ray-agent/v2ray" ]] && [[ -d "/etc/v2ray-agent/v2ray/conf" ]] && [[ ! -z "${customInstallType}" ]]
     then
+        newUUID=`/etc/v2ray-agent/v2ray/v2ctl uuid`
+        newDirectUUID=`/etc/v2ray-agent/v2ray/v2ctl uuid`
+
+        uuidCount=0
         ls /etc/v2ray-agent/v2ray/conf|grep inbounds|while read row
         do
             cat /etc/v2ray-agent/v2ray/conf/${row}|jq .inbounds|jq -c '.[].settings.clients'|jq -c '.[].id'|while read row2
             do
-                oldUUID=`echo ${row2}|awk -F "[\"]" '{print $2}'`
-                newUUID=`/etc/v2ray-agent/v2ray/v2ctl uuid`
-                echoContent red "旧：${oldUUID}"
-                echoContent red "新UUID：${newUUID}"
-                sed -i "s/${oldUUID}/${newUUID}/g"  `grep "${oldUUID}" -rl /etc/v2ray-agent/v2ray/conf/${row}`
+                if [[ "${row}" = "02_VLESS_TCP_inbounds.json" ]]
+                then
+                    if [[ "${uuidCount}" != "1" ]]
+                    then
+                        oldUUID=`echo ${row2}|awk -F "[\"]" '{print $2}'`
+                        sed -i "s/${oldUUID}/${newUUID}/g"  `grep "${oldUUID}" -rl /etc/v2ray-agent/v2ray/conf/${row}`
+                    fi
+                    if [[ "${row}" = "02_VLESS_TCP_inbounds.json" ]]
+                    then
+                        uuidCount=1
+                    fi
+                else
+                    oldUUID=`echo ${row2}|awk -F "[\"]" '{print $2}'`
+                    sed -i "s/${oldUUID}/${newUUID}/g"  `grep "${oldUUID}" -rl /etc/v2ray-agent/v2ray/conf/${row}`
+                fi
+
             done
         done
+
+        currentDirectUUID=`cat /etc/v2ray-agent/v2ray/conf/02_VLESS_TCP_inbounds.json|jq .inbounds|jq -c '.[].settings.clients[1].id'|awk -F "[\"]" '{print $2}'`
+        if [[ ! -z "${currentDirectUUID}" ]]
+        then
+            echoContent red currentDirectUUID:${currentDirectUUID}
+            sed -i "s/${currentDirectUUID}/${newDirectUUID}/g"  `grep "${currentDirectUUID}" -rl /etc/v2ray-agent/v2ray/conf/02_VLESS_TCP_inbounds.json`
+        fi
+
         echoContent green " ---> V2Ray UUID重置完毕"
         handleV2Ray stop
         handleV2Ray start
@@ -1900,9 +2139,6 @@ resetUUID(){
         cat /etc/v2ray-agent/trojan/config.json|jq .password|jq -c '.[]'|while read row
         do
             oldUUID=`echo ${row}|awk -F "[\"]" '{print $2}'`
-            newUUID=`/etc/v2ray-agent/v2ray/v2ctl uuid`
-            echoContent red "旧：${oldUUID}"
-            echoContent red "新UUID：${newUUID}"
             sed -i "s/${oldUUID}/${newUUID}/g"  `grep "${oldUUID}" -rl /etc/v2ray-agent/trojan/config.json`
         done
         echoContent green " ---> Trojan UUID重置完毕"
@@ -2010,7 +2246,7 @@ menu(){
     cd
     echoContent red "\n=============================================================="
     echoContent green "作者：mack-a"
-    echoContent green "当前版本：v2.0.26"
+    echoContent green "当前版本：v2.1.5"
     echoContent green "Github：https://github.com/mack-a/v2ray-agent"
     echoContent green "描述：七合一共存脚本"
     echoContent red "=============================================================="
@@ -2018,8 +2254,8 @@ menu(){
     echoContent yellow "2.任意组合安装"
     echoContent skyBlue "-------------------------工具管理-----------------------------"
     echoContent yellow "3.查看账号"
-    echoContent yellow "4.自动排错"
-    echoContent yellow "5.更新证书 [fail]"
+    echoContent yellow "4.自动排错 [仅V2Ray]"
+    echoContent yellow "5.更新证书"
     echoContent yellow "6.更换CDN节点"
     echoContent yellow "7.重置uuid"
     echoContent skyBlue "-------------------------版本管理-----------------------------"
@@ -2049,9 +2285,9 @@ menu(){
         4)
             checkFail 1
         ;;
-#        5)
-#            renewalTLS 1
-#        ;;
+        5)
+            renewalTLS 1
+        ;;
         6)
             updateV2RayCDN 1
         ;;
@@ -2188,12 +2424,12 @@ defaultInstall(){
     installTrojanGo 9
     installTrojanService 10
     customCDNIP 11
-    initTrojanGoConfig 12
-    initV2RayConfig vlesstcpws 13
+    initV2RayConfig vlesstcpws 12
+    initTrojanGoConfig 13
     installCronTLS 14
     nginxBlog 15
     handleV2Ray stop
-    sleep 1
+    sleep 2
     handleV2Ray start
 
     handleNginx start
